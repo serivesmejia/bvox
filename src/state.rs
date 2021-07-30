@@ -1,5 +1,7 @@
 use winit::event::*;
 use winit::window::Window;
+use wgpu::util::DeviceExt;
+use super::graphics::Vertex;
 
 pub struct State {
     surface: wgpu::Surface,
@@ -10,6 +12,7 @@ pub struct State {
     pub size: winit::dpi::PhysicalSize<u32>,
 
     render_pipeline: wgpu::RenderPipeline,
+    vertex_buffer: wgpu::Buffer,
 }
 
 impl State {
@@ -64,7 +67,9 @@ impl State {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: "main", // 1.
-                buffers: &[], // 2.
+                buffers: &[
+                    Vertex::desc(),
+                ],
             },
             fragment: Some(wgpu::FragmentState { // 3.
                 module: &shader,
@@ -95,15 +100,19 @@ impl State {
             },
         });
 
+        let vertex_buffer = device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Vertex Buffer"),
+                contents: bytemuck::cast_slice(VERTICES),
+                usage: wgpu::BufferUsage::VERTEX,
+            }
+        );
 
         Self {
-            surface,
-            device,
-            queue,
-            sc_desc,
-            swap_chain,
-            size,
-            render_pipeline
+            surface, device,
+            queue, sc_desc,
+            swap_chain, size,
+            render_pipeline, vertex_buffer
         }
     }
 
