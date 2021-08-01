@@ -6,18 +6,21 @@ use crate::shape::*;
 use crate::texture::Texture;
 use crate::shader::*;
 use crate::shader;
-use crate::camera::{Camera, Uniforms};
+use crate::camera::{Camera, Uniforms, Projection};
 use crate::controller::CameraController;
+use crate::instance::*;
 
-const VERTICES: &[Vertex] = &[
-    // Changed
-    Vertex { position: [-0.0868241, 0.49240386, 0.0], tex_coords: [0.4131759, 0.00759614], }, // A
-    Vertex { position: [-0.49513406, 0.06958647, 0.0], tex_coords: [0.0048659444, 0.43041354], }, // B
-    Vertex { position: [-0.21918549, -0.44939706, 0.0], tex_coords: [0.28081453, 0.949397057], }, // C
-    Vertex { position: [0.35966998, -0.3473291, 0.0], tex_coords: [0.85967, 0.84732911], }, // D
-    Vertex { position: [0.44147372, 0.2347359, 0.0], tex_coords: [0.9414737, 0.2652641], }, // E
+use cgmath::Rotation3;
+use cgmath::Zero;
+use cgmath::InnerSpace;
+
+const VERTICES: &[TexturedVertex] = &[
+    TexturedVertex { position: [-0.0868241, 0.49240386, 0.0], tex_coords: [0.4131759, 0.00759614], }, // A
+    TexturedVertex { position: [-0.49513406, 0.06958647, 0.0], tex_coords: [0.0048659444, 0.43041354], }, // B
+    TexturedVertex { position: [-0.21918549, -0.44939706, 0.0], tex_coords: [0.28081453, 0.949397057], }, // C
+    TexturedVertex { position: [0.35966998, -0.3473291, 0.0], tex_coords: [0.85967, 0.84732911], }, // D
+    TexturedVertex { position: [0.44147372, 0.2347359, 0.0], tex_coords: [0.9414737, 0.2652641], }, // E
 ];
-
 
 const INDICES: &[u16] = &[
     0, 1, 4,
@@ -25,6 +28,10 @@ const INDICES: &[u16] = &[
     2, 3, 4,
     /* padding */ 0,
 ];
+
+const NUM_INSTANCES_PER_ROW: u32 = 10;
+const NUM_INSTANCES: u32 = NUM_INSTANCES_PER_ROW * NUM_INSTANCES_PER_ROW;
+const INSTANCE_DISPLACEMENT: cgmath::Vector3<f32> = cgmath::Vector3::new(NUM_INSTANCES_PER_ROW as f32 * 0.5, 0.0, NUM_INSTANCES_PER_ROW as f32 * 0.5);
 
 pub struct State {
     surface: wgpu::Surface,
@@ -43,9 +50,16 @@ pub struct State {
     diffuse_texture: Texture,
 
     camera: Camera, camera_controller: CameraController,
-    uniforms: Uniforms,
+    projection: Projection, uniforms: Uniforms,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
+
+    mouse_pressed: bool,
+
+    instances: Vec<Instance>,
+    instance_buffer: wgpu::Buffer,
+
+    depth_texture: Texture
 }
 
 impl State {
@@ -120,25 +134,12 @@ impl State {
             }
         );
 
-
-        let camera = Camera {
-            // position the camera one unit up and 2 units back
-            // +z is out of the screen
-            eye: (0.0, 1.0, 2.0).into(),
-            // have it look at the origin
-            target: (0.0, 0.0, 0.0).into(),
-            // which way is "up"
-            up: cgmath::Vector3::unit_y(),
-            aspect: sc_desc.width as f32 / sc_desc.height as f32,
-            fovy: 45.0,
-            znear: 0.1,
-            zfar: 100.0,
-        };
-
-        let camera_controller = CameraController::new(0.2);
+        let camera = Camera::new((0.0, 5.0, 10.0), cgmath::Deg(-90.0), cgmath::Deg(-20.0));
+        let projection = Projection::new(sc_desc.width, sc_desc.height, cgmath::Deg(45.0), 0.1, 100.0);
+        let camera_controller = CameraController::new(4.0, 0.4);
 
         let mut uniforms = Uniforms::new();
-        uniforms.update_view_proj(&camera);
+        uniforms.update_view_proj(&camera, &projection);
 
         let uniform_buffer = device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
@@ -191,7 +192,7 @@ impl State {
                 module: &shader.module,
                 entry_point: "main", // 1.
                 buffers: &[
-                    Vertex::desc(),
+                    TexturedVertex::desc(), InstanceRaw::desc(),
                 ],
             },
             fragment: Some(wgpu::FragmentState { // 3.
@@ -215,7 +216,13 @@ impl State {
                 // Requires Features::CONSERVATIVE_RASTERIZATION
                 conservative: false,
             },
-            depth_stencil: None, // 1.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: Texture::DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less, // 1.
+                stencil: wgpu::StencilState::default(), // 2.
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState {
                 count: 1, // 2.
                 mask: !0, // 3.
@@ -249,27 +256,64 @@ impl State {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&diffuse_texture.view), // CHANGED!
+                        resource: wgpu::BindingResource::TextureView(&diffuse_texture.view)
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler), // CHANGED!
+                        resource: wgpu::BindingResource::Sampler(&diffuse_texture.sampler)
                     }
                 ],
                 label: Some("diffuse_bind_group"),
             }
         );
 
+        let instances = (0..NUM_INSTANCES_PER_ROW).flat_map(|z| {
+            (0..NUM_INSTANCES_PER_ROW).map(move |x| {
+                let position = cgmath::Vector3 { x: x as f32, y: 0.0, z: z as f32 } - INSTANCE_DISPLACEMENT;
+
+                let rotation = if position.is_zero() {
+                    // this is needed so an object at (0, 0, 0) won't get scaled to zero
+                    // as Quaternions can effect scale if they're not created correctly
+                    cgmath::Quaternion::from_axis_angle(cgmath::Vector3::unit_z(), cgmath::Deg(0.0))
+                } else {
+                    cgmath::Quaternion::from_axis_angle(position.clone().normalize(), cgmath::Deg(45.0))
+                };
+
+                Instance {
+                    position, rotation,
+                }
+            })
+        }).collect::<Vec<_>>();
+
+        let instance_data = instances.iter().map(Instance::to_raw).collect::<Vec<_>>();
+        let instance_buffer = device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Instance Buffer"),
+                contents: bytemuck::cast_slice(&instance_data),
+                usage: wgpu::BufferUsage::VERTEX,
+            }
+        );
+
+        let depth_texture = Texture::create_depth_texture(&device, &sc_desc, "depth_texture");
+
         Self {
             surface, device,
             queue, sc_desc,
             swap_chain, size,
+
             render_pipeline,
+
             vertex_buffer, index_buffer,
             num_vertices, num_indices,
             diffuse_bind_group, diffuse_texture,
-            camera, camera_controller, uniforms,
+
+            camera, camera_controller, projection, uniforms,
             uniform_buffer, uniform_bind_group,
+
+            mouse_pressed: false,
+
+            instances, instance_buffer,
+            depth_texture
         }
     }
 
@@ -278,15 +322,47 @@ impl State {
         self.sc_desc.width = new_size.width;
         self.sc_desc.height = new_size.height;
         self.swap_chain = self.device.create_swap_chain(&self.surface, &self.sc_desc);
+
+        self.projection.resize(new_size.width, new_size.height);
+
+        self.depth_texture = Texture::create_depth_texture(
+            &self.device, &self.sc_desc, "depth_texture"
+        );
     }
 
-    pub fn input(&mut self, event: &WindowEvent) -> bool {
-        self.camera_controller.process_events(event)
+    pub fn input(&mut self, event: &DeviceEvent) -> bool {
+        match event {
+            DeviceEvent::Key(
+                KeyboardInput {
+                    virtual_keycode: Some(key),
+                    state,
+                    ..
+                }
+            ) => self.camera_controller.process_keyboard(*key, *state),
+            DeviceEvent::MouseWheel { delta, .. } => {
+                self.camera_controller.process_scroll(delta);
+                true
+            }
+            DeviceEvent::Button {
+                button: 1, // Left Mouse Button
+                state,
+            } => {
+                self.mouse_pressed = *state == ElementState::Pressed;
+                true
+            }
+            DeviceEvent::MouseMotion { delta } => {
+                if self.mouse_pressed {
+                    self.camera_controller.process_mouse(delta.0, delta.1);
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
-    pub fn update(&mut self) {
-        self.camera_controller.update_camera(&mut self.camera);
-        self.uniforms.update_view_proj(&self.camera);
+    pub fn update(&mut self, dt: std::time::Duration) {
+        self.camera_controller.update_camera(&mut self.camera, dt);
+        self.uniforms.update_view_proj(&self.camera, &self.projection);
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[self.uniforms]));
     }
 
@@ -318,7 +394,14 @@ impl State {
                         }
                     }
                 ],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: true,
+                    }),
+                    stencil_ops: None,
+                })
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
@@ -326,9 +409,11 @@ impl State {
             render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
             render_pass.set_bind_group(1, &self.uniform_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+
+            render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
             render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
-            render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+            render_pass.draw_indexed(0..self.num_indices, 0, 0..self.instances.len() as _);
         }
 
         // submit will accept anything that implements IntoIter
