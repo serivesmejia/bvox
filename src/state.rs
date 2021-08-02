@@ -2,13 +2,13 @@ use winit::event::*;
 use winit::window::Window;
 use wgpu::util::DeviceExt;
 
-use crate::shape::*;
-use crate::texture::Texture;
+use crate::render::mesh::*;
+use crate::render::texture::Texture;
 use crate::shader::*;
 use crate::shader;
-use crate::camera::{Camera, Uniforms, Projection};
+use crate::render::camera::{Camera, Uniforms, Projection};
 use crate::controller::CameraController;
-use crate::instance::*;
+use crate::render::instance::*;
 
 use cgmath::Rotation3;
 use cgmath::Zero;

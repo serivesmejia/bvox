@@ -1,4 +1,4 @@
-use crate::camera::Camera;
+use crate::render::camera::Camera;
 
 use cgmath::*;
 

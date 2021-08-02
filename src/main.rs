@@ -1,10 +1,7 @@
 mod state;
-mod shape;
-mod texture;
+mod render;
 mod shader;
-mod camera;
 mod controller;
-mod instance;
 
 use crate::state::State;
 
